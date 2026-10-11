@@ -13,6 +13,37 @@ Things it can display on the e-ink:
 | `image`    | Image files                             |
 | `stdin`    | Standard input                          |
 
+---
+
+## ⚡ WeAct Studio 3.7" E-Paper (UC8253) — Soporte de Producción
+
+Este fork incluye soporte completo y calibrado para el módulo **WeAct Studio 3.7" E-Paper Display** (panel Good Display GDEY037T03, controlador **UltraChip UC8253**, resolución $240 \times 416$):
+
+* **Nombre del Driver:** `--driver WeAct3in7_UC8253`
+* **Bus SPI a 20.0 MHz** con transferencias DMA directas vía kernel `spi_bcm2835`.
+* **Forma de Onda Fast A2 Bipolar:** Cancelación de carga residual capacitiva ($\int V dt \approx 0$) con asentamiento profundo para negros sólidos.
+* **Comparador Diferencial Real en Silicio:** Registro `0x10` (`old_crop_bytes`) y `0x13` (`new_crop_bytes`), erradicando caracteres alternados en gris.
+* **Ventana Parcial Atómica:** Ventana de $16 \times 6$ píxeles (12 bytes transferidos por tecla).
+* **Cero Parpadeo:** Escritura fluida en línea y avance por scroll sin disparar refrescos completos arbitrarios.
+* **Tipografía Terminus 6×12:** Densidad óptima de **69 columnas $\times$ 19 filas** en apaisado.
+* **Purga Profunda (Hard Clean Purge):** Ciclo completo con forma de onda OTP de fábrica al invocar `clear`/`clean` o tras 50 s de inactividad.
+
+### 🚀 Instalación y Sintonía en Raspberry Pi
+```bash
+# 1. Clonar este repositorio
+git clone https://github.com/l707l/PaperTTY.git
+cd PaperTTY
+
+# 2. Ejecutar instalador y optimizador de Raspberry Pi
+chmod +x scripts/install.sh scripts/tune_rpi.sh scripts/trigger_clean.sh
+./scripts/install.sh
+sudo ./scripts/tune_rpi.sh
+```
+
+Documentación técnica completa disponible en [docs/INFORME_TECNICO.md](docs/INFORME_TECNICO.md).
+
+---
+
 To use any feature, you need to select an appropriate driver for your e-ink display as a top-level option (`papertty --driver X ...`). To see the list of drivers, use `papertty list`.
 
 To see help for individual subcommands, use `--help` with them, ie. `papertty --driver X --terminal --help`.

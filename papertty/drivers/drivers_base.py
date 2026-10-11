@@ -42,6 +42,7 @@ class SpiDev:
     """This is a mock SpiDev class which abstracts the actual SPI device.
     This is so we can use a single class to interface with multiple
     different backends.
+    Prioritizes native Linux spidev with hardware DMA for high-speed transfers.
     """
 
     gpiozero = False
@@ -49,18 +50,29 @@ class SpiDev:
 
     def __init__(self):
         try:
-            factory = Device._default_pin_factory()
-            self.spi = SPIDevice(pin_factory=factory)
-            self.gpiozero = True
-        except Exception as e:
-            print("Failed to init gpiozero spi device")
             self.spi = spidev.SpiDev(0, 0)
+            self.spi.max_speed_hz = 20000000
+            self.spi.mode = 0b00
+            self.gpiozero = False
+        except Exception:
+            try:
+                factory = Device._default_pin_factory()
+                self.spi = SPIDevice(pin_factory=factory)
+                self.gpiozero = True
+            except Exception as e:
+                print("Failed to init SPI device:", e)
 
     def writebytes(self, data):
-        if self.gpiozero:
-            self.spi._spi.write(data)
+        if not self.gpiozero:
+            if hasattr(self.spi, 'writebytes2'):
+                if isinstance(data, (bytes, bytearray)):
+                    self.spi.writebytes2(data)
+                else:
+                    self.spi.writebytes2(bytes(data))
+            else:
+                self.spi.writebytes(list(data))
         else:
-            self.spi.writebytes(data)
+            self.spi._spi.write(data)
 
     def readbytes(self, n):
         if self.gpiozero:
@@ -71,14 +83,20 @@ class SpiDev:
     def setSpeed(self, hz):
         if not self.gpiozero:
             self.spi.max_speed_hz = hz
+        elif hasattr(self.spi, '_spi') and hasattr(self.spi._spi, 'max_speed_hz'):
+            self.spi._spi.max_speed_hz = hz
 
     def setMode(self, mode):
         if not self.gpiozero:
             self.spi.mode = mode
+        elif hasattr(self.spi, '_spi') and hasattr(self.spi._spi, 'mode'):
+            self.spi._spi.mode = mode
 
     def setNoCs(self, value):
         if not self.gpiozero:
             self.spi.no_cs = value
+        elif hasattr(self.spi, '_spi') and hasattr(self.spi._spi, 'no_cs'):
+            self.spi._spi.no_cs = value
 
 class GPIO:
 
@@ -300,7 +318,7 @@ class WaveshareEPD(DisplayDriver):
         #SpiDev init must come first, otherwise CS_PIN read conflicts
         #will sometimes occur during startup.
         self.SPI = SpiDev()
-        self.SPI.setSpeed(2000000)
+        self.SPI.setSpeed(20000000)
         self.SPI.setMode(0b00)
 
         GPIO.setmode(GPIO.BCM)
@@ -344,9 +362,15 @@ class WaveshareEPD(DisplayDriver):
 
     def send_data_multi(self, dataArray):
         self.digital_write(self.DC_PIN, GPIO.HIGH)
-        max_transfer_size = 4096
-        for i in range(0, len(dataArray), max_transfer_size):
-            self.spi_transfer(dataArray[i: i + max_transfer_size])
+        if not self.SPI.gpiozero and hasattr(self.SPI.spi, 'writebytes2'):
+            if isinstance(dataArray, (bytes, bytearray)):
+                self.SPI.spi.writebytes2(dataArray)
+            else:
+                self.SPI.spi.writebytes2(bytes(dataArray))
+        else:
+            max_transfer_size = 4096
+            for i in range(0, len(dataArray), max_transfer_size):
+                self.spi_transfer(dataArray[i: i + max_transfer_size])
 
     def reset(self):
         self.digital_write(self.RST_PIN, GPIO.LOW)

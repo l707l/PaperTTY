@@ -19,6 +19,7 @@ import papertty.drivers.drivers_color as drivers_color
 import papertty.drivers.drivers_colordraw as drivers_colordraw
 import papertty.drivers.driver_it8951 as driver_it8951
 import papertty.drivers.drivers_4in2 as driver_4in2
+import papertty.drivers.drivers_weact3in7 as drivers_weact3in7
 
 # for ioctl
 import fcntl
@@ -39,6 +40,17 @@ import time
 import click
 # for drawing
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+
+# Pillow 10+ compatibility patch for getsize()
+def _compat_getsize(self, text):
+    bbox = self.getbbox(text)
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1]) if bbox else (0, 0)
+
+if not hasattr(ImageFont.ImageFont, 'getsize'):
+    ImageFont.ImageFont.getsize = _compat_getsize
+if hasattr(ImageFont, 'FreeTypeFont') and not hasattr(ImageFont.FreeTypeFont, 'getsize'):
+    ImageFont.FreeTypeFont.getsize = _compat_getsize
+
 # for tidy driver list
 from collections import OrderedDict
 # for VNC
@@ -399,13 +411,14 @@ class PaperTTY:
                 previous_vnc_image = new_vnc_image.copy()
                 time.sleep(float(sleep))
 
-    def showtext(self, text, fill, cursor=None, portrait=False, flipx=False, flipy=False, oldimage=None, oldtext=None, oldcursor=None):
+    def showtext(self, text, fill, cursor=None, portrait=False, flipx=False, flipy=False, oldimage=None, oldtext=None, oldcursor=None, force_full=False):
         """Draw a string on the screen"""
         if self.ready():
+
             
             #If partial updates are supported, run partialdraw_showtext() instead
             #as it should be more efficient.
-            if self.driver.supports_partial and self.partial:
+            if self.driver.supports_partial and self.partial and not force_full:
                 
                 if oldtext is None:
                     oldtext = ""
@@ -418,6 +431,7 @@ class PaperTTY:
                               self.white)
             # create the Draw object and draw the text
             draw = ImageDraw.Draw(image)
+            draw.fontmode = '1'
 
             # Split the text up by line and display each line individually.
             # This is a workaround for a font height bug in PIL
@@ -442,7 +456,7 @@ class PaperTTY:
             if flipy:
                 image = image.transpose(Image.FLIP_TOP_BOTTOM)
             # find out which part changed and draw only that on the display
-            if oldimage and self.driver.supports_partial and self.partial:
+            if oldimage and self.driver.supports_partial and self.partial and not force_full:
                 # create a bounding box of the altered region and
                 # make the X coordinates divisible by 8
                 if self.driver.supports_1bpp and self.driver.enable_1bpp:
@@ -505,10 +519,12 @@ class PaperTTY:
         #of the panel refresh.
         #
         #The value of maxRedraw should probably always be either 1 or 2.
-        if not self.driver.supports_multi_draw:
-            maxRedraw = 1
-            blocks = self.partialdraw_get_text_blocks(changedLines)
-            self.partialdraw_merge_text_blocks(blocks, maxRedraw, changedLines)
+        # Desactivado para evitar agrupar lineas distantes en un bloque gigantesco
+        # que provocaba falsos refrescos de pantalla completa (240x416).
+        # if not self.driver.supports_multi_draw:
+        #     maxRedraw = 1
+        #     blocks = self.partialdraw_get_text_blocks(changedLines)
+        #     self.partialdraw_merge_text_blocks(blocks, maxRedraw, changedLines)
         
 
         #For each line in `changedLines`, figure out its coordinates and other information
@@ -599,7 +615,8 @@ class PaperTTY:
         #List of lines of text which have changed
         changedLines = []
 
-        for i in range(self.rows):
+        rows = self.rows if self.rows is not None else max(len(newlines), len(oldlines), 1)
+        for i in range(rows):
             
             newval = newlines[i] if i < len(newlines) else ''
             oldval = oldlines[i] if i < len(oldlines) else ''
@@ -614,7 +631,7 @@ class PaperTTY:
                 if cur_y == i:
                     cursorIsOnThisLine = True
 
-            if oldcursor:
+            if oldcursor and self.cursor:
                 cur_y = oldcursor[1]
                 if cur_y == i:
                     cursorWasOnThisLine = True
@@ -1012,6 +1029,7 @@ class PaperTTY:
 
         #Then get the ImageDraw object so we can actually draw on the image.
         draw = ImageDraw.Draw(image)
+        draw.fontmode = '1'
 
 
         #For each chunk, draw the text and possibly the cursor
@@ -1064,7 +1082,7 @@ def get_drivers():
     """Get the list of available drivers as a dict
     Format: { '<NAME>': { 'desc': '<DESCRIPTION>', 'class': <CLASS> }, ... }"""
     driverdict = {}
-    driverlist = [drivers_partial.EPD1in54, drivers_partial.EPD2in13,
+    driverlist = [drivers_weact3in7.WeAct3in7_UC8253, drivers_partial.EPD1in54, drivers_partial.EPD2in13,
                   drivers_partial.EPD2in13v2, drivers_partial.EPD2in9,
                   drivers_partial.EPD2in13d, driver_4in2.EPD4in2,
 
@@ -1479,17 +1497,79 @@ def terminal(settings, vcsa, font, fontsize, noclear, nocursor, cursor, sleep, t
                     cursor = (x, y, char_under_cursor.decode(encoding, 'ignore'))
                     # add newlines per column count
                     buff = ''.join([r.decode(encoding, 'replace') + '\n' for r in ptty.split(buff, cols * character_width)])
-                    # do something only if content has changed or cursor was moved
-                    if buff != oldbuff or cursor != oldcursor:
-                        # show new content
+                    # Check if a screen clear was triggered (Ctrl+L, clean, clear command)
+                    clear_triggered = False
+
+                    # 1. Trigger file check (from clean/clear command or Ctrl+L binding)
+                    if os.path.exists('/tmp/papertty_clear_trigger'):
+                        try:
+                            os.remove('/tmp/papertty_clear_trigger')
+                        except Exception:
+                            pass
+                        clear_triggered = True
+
+                    # 2. Automated screen clear detection from virtual console buffer
+                    if not clear_triggered and oldbuff:
+                        old_lines = oldbuff.split('\n')
+                        new_lines = buff.split('\n')
+                        old_non_empty = [l for l in old_lines if l.strip()]
+                        new_non_empty = [l for l in new_lines if l.strip()]
+
+                        # Previous command was clear or clean
+                        cmd_was_clear = any(cmd in l for l in old_non_empty for cmd in ('clear', 'clean')) and len(new_non_empty) <= 1
+
+                        if cmd_was_clear:
+                            clear_triggered = True
+
+                    # do something only if content has changed or cursor was moved or clear was triggered
+                    if buff != oldbuff or cursor != oldcursor or clear_triggered:
+                        is_tui_or_full = False
+                        if clear_triggered:
+                            ptty.driver.clear()
+                            oldimage = None
+                        elif buff != oldbuff:
+                            old_lines = oldbuff.split('\n') if oldbuff else []
+                            new_lines = buff.split('\n')
+                            total_rows = max(len(new_lines), len(old_lines), 1)
+                            diff_rows = sum(1 for i in range(total_rows) if (old_lines[i] if i < len(old_lines) else '') != (new_lines[i] if i < len(new_lines) else ''))
+
+                            # Regla 1: Si es digitación o edición en línea (diff_rows <= 2), NUNCA es TUI ni refresco completo
+                            if diff_rows > 2 and oldbuff:
+                                # Regla 2: Detectar si es un simple desplazamiento de terminal (scroll de texto al pulsar Enter o salida de comando)
+                                is_scroll = False
+                                for shift in (1, 2, 3, 4):
+                                    if len(old_lines) > shift and len(new_lines) > shift:
+                                        matching_shifted = sum(1 for i in range(min(len(old_lines) - shift, len(new_lines))) if old_lines[i + shift] == new_lines[i])
+                                        if matching_shifted >= (total_rows * 0.4):
+                                            is_scroll = True
+                                            break
+
+                                if not is_scroll:
+                                    tui_signatures = ('btop', 'htop', 'top -', 'Tasks:', 'Cpu(s):', 'fastfetch', 'neofetch')
+                                    # Solo activar si la firma es nueva en este cuadro
+                                    new_tui = any(sig in buff and sig not in oldbuff for sig in tui_signatures)
+                                    change_ratio = diff_rows / float(total_rows)
+                                    non_empty_new = sum(1 for l in new_lines if l.strip())
+                                    if new_tui or (change_ratio >= 0.70 and non_empty_new >= (total_rows * 0.5)):
+                                        is_tui_or_full = True
+
+
+
+                        # show new content:
+                        # Si es TUI o cambio masivo, ejecutar refresco completo draw_full();
+                        # para flujo normal (ls, cat, cd, echo, edicion, Enter), refresco rapido parcial.
                         oldimage = ptty.showtext(buff, fill=ptty.black, cursor=cursor if not nocursor else None,
-                                                oldimage=oldimage,
-                                                oldtext=oldbuff,
-                                                oldcursor=oldcursor,
+                                                oldimage=oldimage if not is_tui_or_full else None,
+                                                oldtext=oldbuff if not (clear_triggered or is_tui_or_full) else None,
+                                                oldcursor=oldcursor if not (clear_triggered or is_tui_or_full) else None,
+                                                force_full=is_tui_or_full,
                                                 **textargs)
                         oldbuff = buff
                         oldcursor = cursor
                     else:
+                        if hasattr(ptty.driver, 'check_idle_purge'):
+                            if ptty.driver.check_idle_purge():
+                                oldimage = None
                         # delay before next update check
                         time.sleep(float(sleep))
 
